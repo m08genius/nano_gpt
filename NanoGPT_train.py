@@ -1,11 +1,11 @@
 import torch
 import torch.nn.functional as F
 import time
-import pickle
 
 from NanoGPT import NanoGPT
 from NanoGPT_Tokenizer import NanoGPT_Tokenizer
 from NanoGPT_Dataset import NanoGPT_Dataset
+from ModelCheckpoint import ModelCheckpoint
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 print(device)
@@ -13,52 +13,41 @@ print(device)
 n_gpus = torch.cuda.device_count()
 print(n_gpus)
 
-tokenizer = NanoGPT_Tokenizer("input.txt")
-dataset = NanoGPT_Dataset(tokenizer=tokenizer, train_percent=0.9)
+# Load and create datasets
+input_data_file = "./input.txt"
+train_percent = 0.9
+tokenizer = NanoGPT_Tokenizer(input_data_file)
+dataset = NanoGPT_Dataset(tokenizer=tokenizer, train_percent=train_percent)
 
+# Model PARAMS
 block_size = 256
 model = NanoGPT(vocab_size=tokenizer.get_vocab_size(), block_size=block_size)
+
+# Load the model PARAMS
+filepath = "./checkpoints"
+epoch_id = 1
+model_checkpoint = ModelCheckpoint(filepath=filepath, epoch_id=epoch_id, model_name=model.get_model_name(), block_size=block_size)
+model_checkpoint.load_model_params(model=model)
 model = model.to(device)
-optimizer = torch.optim.AdamW(model.parameters(), lr = 0.001)
+
+# Create optimzer
+learning_rate = 0.001
+optimizer = torch.optim.AdamW(model.parameters(), lr = learning_rate)
 optimizer.zero_grad()
 
-global_train_loss = []
-global_val_loss = []
-
-filepath = "."
-template = "{}/{}_{}_{}.{}"
-
-model_file_template = template.format(filepath, model.get_model_name(), "MODEL", "{}", "pt")
-global_train_loss_template = template.format(filepath, model.get_model_name(), "TRAIN_LOSS", "{}", "pkl")
-global_val_loss_template = template.format(filepath, model.get_model_name(), "VAL_LOSS", "{}", "pkl")
-print(model_file_template)
-print(global_train_loss_template)
-print(global_val_loss_template)
-
-global_epoch = 1
-if not global_epoch is None:
-    model.load_state_dict(torch.load(model_file_template.format(global_epoch)))
-
-    with open(global_train_loss_template.format(global_epoch), 'rb') as f:
-        global_train_loss = pickle.load(f)
-
-    with open(global_val_loss_template.format(global_epoch), 'rb') as f:
-        global_val_loss = pickle.load(f)
-
-    print(global_train_loss)
-    print(global_val_loss)
-
-
+# Load the datasets
 batch_size = 1024
 train_dl, val_dl = dataset.get_train_val_dl(batch_size=batch_size, block_size=block_size)
 
+# Training loop
 epochs = 60
-epoch_start = 0 if global_epoch is None else global_epoch + 1
-for epoch in range(epoch_start, epochs+epoch_start):
-    print(f"Epoch: {epoch}")
+train_loss, val_loss = model_checkpoint.load_loss()
+for epoch in range(epochs):
+    model_checkpoint.update_epoch()
+    print(f"Epoch: {model_checkpoint.get_epoch()}")
     
     start_train = time.time()
-    total_train_loss = 0.0
+    train_loss_epoch = 0.0
     for x_batch, y_batch in train_dl:
         # Move to gpu.
         x_batch, y_batch = x_batch.to(device), y_batch.to(device)
@@ -70,12 +59,12 @@ for epoch in range(epoch_start, epochs+epoch_start):
         loss.backward()
         optimizer.step()
         optimizer.zero_grad()
-        total_train_loss += (loss.item() * B)
+        train_loss_epoch += (loss.item() * B)
     end_train = time.time()
 
     model.eval()
     start_val = time.time()
-    total_val_loss = 0.0
+    val_loss_epoch = 0.0
     with torch.no_grad():
         for x_val, y_val in val_dl:
             # move to gpu
@@ -84,22 +73,17 @@ for epoch in range(epoch_start, epochs+epoch_start):
             pred = model(x_val)
             B, T, C = pred.shape
             loss = F.cross_entropy(pred.view(B*T, C), y_val.view(B*T))
-            total_val_loss += (loss.item() * B)
+            val_loss_epoch += (loss.item() * B)
     end_val = time.time()
     model.train()
 
-    global_train_loss.append(total_train_loss / len(train_dl.dataset))
-    global_val_loss.append(total_val_loss / len(val_dl.dataset))
+    train_loss.append(train_loss_epoch / len(train_dl.dataset))
+    train_loss.append(val_loss_epoch / len(val_dl.dataset))
     print(f"Train time: {end_train - start_train}, Val time: {end_val - start_val}")
-    print(f"Train Loss: {global_train_loss[-1]}, Val Loss: {global_val_loss[-1]}")
-    torch.save(model.state_dict(), model_file_template.format(epoch))
-    with open(global_train_loss_template.format(epoch), "wb") as fp:
-        pickle.dump(global_train_loss, fp)
-    with open(global_val_loss_template.format(epoch), "wb") as fp:
-        pickle.dump(global_val_loss, fp)
-    global_epoch = epoch
+    print(f"Train Loss: {train_loss[-1]}, Val Loss: {val_loss[-1]}")
 
-print("Done epoch: ", global_epoch)
+    model_checkpoint.save(model=model, train_loss=train_loss, val_loss=val_loss)
+
 # from matplotlib import pyplot as plt
 # import numpy as np
 # plt.plot(np.arange(len(global_train_loss)), global_train_loss, label="Train Loss")
